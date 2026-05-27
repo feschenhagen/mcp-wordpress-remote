@@ -3,6 +3,8 @@
  */
 
 import { jest } from '@jest/globals';
+import * as fs from 'fs';
+import * as path from 'path';
 import { mockEnv } from '../utils/test-helpers.js';
 
 describe('Configuration Module', () => {
@@ -22,9 +24,9 @@ describe('Configuration Module', () => {
   describe('CONFIG object', () => {
     it('should have default values when no environment variables are set', async () => {
       restoreEnv = mockEnv({});
-      
+
       const { CONFIG } = await import('../../src/lib/config.js');
-      
+
       expect(CONFIG.WP_API_URL).toBe('https://example.com');
       expect(CONFIG.OAUTH_ENABLED).toBe(false); // OAuth is disabled by default
       expect(CONFIG.OAUTH_CALLBACK_PORT).toBeUndefined(); // Default is undefined for auto-select
@@ -96,7 +98,11 @@ describe('Configuration Module', () => {
       const result = validateConfig();
 
       expect(result.isValid).toBe(false);
-      expect(result.errors.some(error => error.includes('WP_API_URL must be set to your WordPress site URL'))).toBe(true);
+      expect(
+        result.errors.some(error =>
+          error.includes('WP_API_URL must be set to your WordPress site URL')
+        )
+      ).toBe(true);
     });
 
     it('should pass validation with valid URL format', async () => {
@@ -124,7 +130,11 @@ describe('Configuration Module', () => {
       const result = validateConfig();
 
       expect(result.isValid).toBe(false);
-      expect(result.errors.some(error => error.includes('OAUTH_CALLBACK_PORT must be a valid port number (1-65535)'))).toBe(true);
+      expect(
+        result.errors.some(error =>
+          error.includes('OAUTH_CALLBACK_PORT must be a valid port number (1-65535)')
+        )
+      ).toBe(true);
     });
 
     it('should require some authentication method even when OAuth is disabled', async () => {
@@ -138,7 +148,9 @@ describe('Configuration Module', () => {
       const result = validateConfig();
 
       expect(result.isValid).toBe(false);
-      expect(result.errors.some(error => error.includes('No authentication method configured'))).toBe(true);
+      expect(
+        result.errors.some(error => error.includes('No authentication method configured'))
+      ).toBe(true);
     });
   });
 
@@ -230,7 +242,7 @@ describe('Configuration Module', () => {
   describe('parseOAuthScopes function', () => {
     it('should return default scopes when environment variable is empty', async () => {
       const { parseOAuthScopes } = await import('../../src/lib/config.js');
-      
+
       const defaultScopes = ['read', 'write'];
       expect(parseOAuthScopes('', defaultScopes)).toEqual(['read', 'write']);
       expect(parseOAuthScopes('   ', defaultScopes)).toEqual(['read', 'write']);
@@ -238,24 +250,29 @@ describe('Configuration Module', () => {
 
     it('should parse comma-separated scopes correctly', async () => {
       const { parseOAuthScopes } = await import('../../src/lib/config.js');
-      
+
       const defaultScopes = ['read', 'write'];
       expect(parseOAuthScopes('global', defaultScopes)).toEqual(['global']);
-      expect(parseOAuthScopes('read,write,admin', defaultScopes)).toEqual(['read', 'write', 'admin']);
-      expect(parseOAuthScopes(' read , write , admin ', defaultScopes)).toEqual(['read', 'write', 'admin']);
+      expect(parseOAuthScopes('read,write,admin', defaultScopes)).toEqual([
+        'read',
+        'write',
+        'admin',
+      ]);
+      expect(parseOAuthScopes(' read , write , admin ', defaultScopes)).toEqual([
+        'read',
+        'write',
+        'admin',
+      ]);
     });
 
     it('should filter out empty scopes', async () => {
       const { parseOAuthScopes } = await import('../../src/lib/config.js');
-      
+
       const defaultScopes = ['read', 'write'];
       expect(parseOAuthScopes('read,,write', defaultScopes)).toEqual(['read', 'write']);
       expect(parseOAuthScopes(',read,write,', defaultScopes)).toEqual(['read', 'write']);
     });
-
   });
-
-
 
   describe('Health status function', () => {
     it('should return health status with configuration state', async () => {
@@ -265,10 +282,13 @@ describe('Configuration Module', () => {
       });
 
       const { getConfigHealthStatus } = await import('../../src/lib/config.js');
+      const packageJson = JSON.parse(
+        fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')
+      ) as { version: string };
       const status = getConfigHealthStatus();
 
       expect(status.status).toBe('healthy');
-      expect(status.version).toBe('0.2.19');
+      expect(status.version).toBe(packageJson.version);
       expect(status.uptime).toBeGreaterThan(0);
       expect(status.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     });

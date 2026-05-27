@@ -1,10 +1,64 @@
 import * as os from 'os';
 import * as path from 'path';
+import * as fs from 'fs';
+import { createRequire as createNodeRequire } from 'module';
 import { selectCallbackPort } from './port-utils.js';
 import { logger } from './utils.js';
 
-// Version constant - update this manually when releasing new versions
-export const MCP_WORDPRESS_REMOTE_VERSION = '0.2.21';
+const PACKAGE_NAME = '@automattic/mcp-wordpress-remote';
+
+const packageJsonPathCandidates = (): string[] => {
+  const candidates = [path.resolve(process.cwd(), 'package.json')];
+
+  try {
+    const requireFromCwd = createNodeRequire(path.join(process.cwd(), 'package.json'));
+    const packageEntry = requireFromCwd.resolve(PACKAGE_NAME);
+    candidates.push(path.resolve(path.dirname(packageEntry), '..', 'package.json'));
+  } catch {
+    // The package may be running from source or as a direct bin path.
+  }
+
+  if (process.argv[1]) {
+    try {
+      candidates.push(
+        path.resolve(path.dirname(fs.realpathSync(process.argv[1])), '..', 'package.json')
+      );
+    } catch {
+      candidates.push(path.resolve(path.dirname(process.argv[1]), '..', 'package.json'));
+    }
+  }
+
+  return [...new Set(candidates)];
+};
+
+const readPackageVersion = (): string => {
+  if (process.env.npm_package_name === PACKAGE_NAME && process.env.npm_package_version) {
+    return process.env.npm_package_version;
+  }
+
+  for (const packageJsonPath of packageJsonPathCandidates()) {
+    if (!fs.existsSync(packageJsonPath)) {
+      continue;
+    }
+
+    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as {
+      name?: unknown;
+      version?: unknown;
+    };
+
+    if (
+      packageJson.name === PACKAGE_NAME &&
+      typeof packageJson.version === 'string' &&
+      packageJson.version.length > 0
+    ) {
+      return packageJson.version;
+    }
+  }
+
+  throw new Error('Unable to read mcp-wordpress-remote version from package.json');
+};
+
+export const MCP_WORDPRESS_REMOTE_VERSION = readPackageVersion();
 
 /**
  * Centralized configuration for MCP WordPress Remote
@@ -165,7 +219,7 @@ export function getDefaultOAuthScopes(): string[] {
 /**
  * Parse custom headers from environment variable
  * Supports both JSON format and comma-separated format
- * 
+ *
  * JSON format: {"X-MCP-API-Key": "value", "X-Custom-Header": "value"}
  * Comma format: X-MCP-API-Key:value,X-Custom-Header:value
  */
@@ -223,7 +277,7 @@ export function validateConfig(): { isValid: boolean; errors: string[] } {
   const currentJwtToken = process.env.JWT_TOKEN || CONFIG.JWT_TOKEN;
   const currentUsername = process.env.WP_API_USERNAME || CONFIG.WP_API_USERNAME;
   const currentPassword = process.env.WP_API_PASSWORD || CONFIG.WP_API_PASSWORD;
-  const currentOAuthEnabled = (process.env.OAUTH_ENABLED === 'true') || CONFIG.OAUTH_ENABLED;
+  const currentOAuthEnabled = process.env.OAUTH_ENABLED === 'true' || CONFIG.OAUTH_ENABLED;
 
   // Check if we have at least one authentication method
   const hasJWT = !!currentJwtToken;
