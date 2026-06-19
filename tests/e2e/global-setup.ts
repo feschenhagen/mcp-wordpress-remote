@@ -26,7 +26,7 @@ async function globalSetup(config: FullConfig) {
 
   // Set up mock WordPress API server if needed
   // This would start a mock server for testing OAuth flows
-  
+
   console.log('E2E test environment setup complete');
 }
 

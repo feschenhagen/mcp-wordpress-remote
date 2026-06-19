@@ -14,7 +14,7 @@ async function globalTeardown(config: FullConfig) {
   }
 
   // Clean up any test servers that might be running
-  
+
   console.log('E2E test environment cleanup complete');
 }
 

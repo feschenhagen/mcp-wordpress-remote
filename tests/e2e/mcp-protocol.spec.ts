@@ -61,7 +61,7 @@ test.describe('MCP Protocol Integration', () => {
 
     // Should show tool execution result
     await expect(page.locator('.tool-result')).toBeVisible();
-    
+
     const result = await page.locator('.tool-result pre').textContent();
     const toolResponse = JSON.parse(result || '{}');
 
@@ -92,7 +92,7 @@ test.describe('MCP Protocol Integration', () => {
 
     // Should show resource content
     await expect(page.locator('.resource-content')).toBeVisible();
-    
+
     const content = await page.locator('.resource-content pre').textContent();
     const resourceData = JSON.parse(content || '{}');
 
@@ -115,15 +115,18 @@ test.describe('MCP Protocol Integration', () => {
 
     // Fill in prompt details
     await page.fill('#prompt-name', 'wordpress_content_summary');
-    await page.fill('#prompt-arguments', JSON.stringify({ 
-      post_type: 'post',
-      limit: 10 
-    }));
+    await page.fill(
+      '#prompt-arguments',
+      JSON.stringify({
+        post_type: 'post',
+        limit: 10,
+      })
+    );
     await page.click('#get-prompt');
 
     // Should show prompt result
     await expect(page.locator('.prompt-result')).toBeVisible();
-    
+
     const result = await page.locator('.prompt-result pre').textContent();
     const promptResponse = JSON.parse(result || '{}');
 
@@ -141,7 +144,7 @@ test.describe('MCP Protocol Integration', () => {
 
     // Should show error response
     await expect(page.locator('.error-message')).toBeVisible();
-    
+
     const errorText = await page.locator('.error-message').textContent();
     expect(errorText).toContain('Tool not found');
   });
@@ -159,7 +162,7 @@ test.describe('MCP Protocol Integration', () => {
 
     // Tools list should be consistent across requests
     expect(tools1).toBe(tools2);
-    
+
     // Both should be valid JSON responses
     expect(() => JSON.parse(tools1 || '{}')).not.toThrow();
     expect(() => JSON.parse(resources || '{}')).not.toThrow();
@@ -207,7 +210,7 @@ test.describe('MCP Protocol Integration', () => {
 
     // Subsequent requests should have more verbose logging
     await page.goto('/mcp/tools/list');
-    
+
     // Check for debug information (implementation specific)
     const hasDebugInfo = await page.locator('.debug-info').isVisible();
     // Debug info might not be visible in UI, but logging should be affected
@@ -223,7 +226,7 @@ test.describe('MCP Protocol Integration', () => {
 
     // Should provide completions
     await expect(page.locator('.completion-results')).toBeVisible();
-    
+
     const results = await page.locator('.completion-results pre').textContent();
     const completionResponse = JSON.parse(results || '{}');
 
@@ -241,7 +244,7 @@ test.describe('MCP Protocol Integration', () => {
 
     // Should handle large response without timeout
     await expect(page.locator('.tool-result')).toBeVisible({ timeout: 10000 });
-    
+
     const result = await page.locator('.tool-result pre').textContent();
     expect(result).toBeTruthy();
     expect(result!.length).toBeGreaterThan(1000); // Should be substantial data

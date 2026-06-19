@@ -25,7 +25,7 @@ export function createMockToken(overrides: Partial<WPTokens> = {}): WPTokens {
  * Creates an expired mock token for testing token refresh flows
  */
 export function createExpiredToken(overrides: Partial<WPTokens> = {}): WPTokens {
-  const pastTime = Date.now() - (2 * 60 * 60 * 1000); // 2 hours ago
+  const pastTime = Date.now() - 2 * 60 * 60 * 1000; // 2 hours ago
   return createMockToken({
     obtained_at: pastTime,
     expires_in: 3600, // 1 hour (so it's expired)
@@ -130,7 +130,7 @@ export function createMockAuthUrl(clientId: string, state?: string): string {
     scope: 'global',
     ...(state && { state }),
   });
-  
+
   return `https://api.example.com/oauth2/authorize?${params.toString()}`;
 }
 

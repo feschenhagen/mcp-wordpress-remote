@@ -49,7 +49,9 @@ describe('Utils Module', () => {
       log('Test message', LogLevel.INFO, 'TEST');
 
       expect(process.stderr.write).toHaveBeenCalledWith(
-        expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \[INFO\] \[TEST\] Test message\n$/)
+        expect.stringMatching(
+          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \[INFO\] \[TEST\] Test message\n$/
+        )
       );
     });
 
@@ -59,6 +61,33 @@ describe('Utils Module', () => {
       const { log, LogLevel } = await import('../../src/lib/utils.js');
 
       log('Test message', LogLevel.INFO, 'TEST');
+
+      expect(process.stderr.write).not.toHaveBeenCalled();
+    });
+
+    it('should always write ERROR-level logs to stderr even when LOG_TO_STDERR is not set', async () => {
+      // Regression test for issue #61: init/connection failures were silent
+      // because logs only reached stderr when LOG_TO_STDERR=true. Errors must
+      // always be visible so a failure is self-diagnosable.
+      restoreEnv = mockEnv({});
+
+      const { log, LogLevel } = await import('../../src/lib/utils.js');
+
+      log('Connection failed', LogLevel.ERROR, 'INIT');
+
+      expect(process.stderr.write).toHaveBeenCalledWith(
+        expect.stringMatching(/\[ERROR\] \[INIT\] Connection failed\n$/)
+      );
+    });
+
+    it('should still gate non-error levels behind LOG_TO_STDERR', async () => {
+      restoreEnv = mockEnv({ LOG_LEVEL: '3' });
+
+      const { log, LogLevel } = await import('../../src/lib/utils.js');
+
+      log('Warn message', LogLevel.WARN, 'TEST');
+      log('Info message', LogLevel.INFO, 'TEST');
+      log('Debug message', LogLevel.DEBUG, 'TEST');
 
       expect(process.stderr.write).not.toHaveBeenCalled();
     });
@@ -90,6 +119,53 @@ describe('Utils Module', () => {
 
       expect(process.stderr.write).toHaveBeenCalledWith(
         expect.stringMatching(/Test with args\n.*"key":\s*"value".*string arg/s)
+      );
+    });
+
+    it('should include Error message and stack in log output', async () => {
+      restoreEnv = mockEnv({
+        LOG_TO_STDERR: 'true',
+        LOG_LEVEL: '3', // DEBUG level to see the message
+      });
+
+      const { log, LogLevel } = await import('../../src/lib/utils.js');
+
+      log('Init failed', LogLevel.ERROR, 'INIT', new Error('connection refused'));
+
+      // Plain JSON.stringify(new Error()) returns "{}" — the message must survive.
+      expect(process.stderr.write).toHaveBeenCalledWith(
+        expect.stringMatching(/"message":\s*"connection refused"/)
+      );
+      expect(process.stderr.write).toHaveBeenCalledWith(expect.stringMatching(/"name":\s*"Error"/));
+      expect(process.stderr.write).toHaveBeenCalledWith(expect.stringMatching(/"stack":/));
+    });
+
+    it('should include custom error properties like statusCode and endpoint', async () => {
+      restoreEnv = mockEnv({
+        LOG_TO_STDERR: 'true',
+        LOG_LEVEL: '3',
+      });
+
+      const { log, LogLevel } = await import('../../src/lib/utils.js');
+
+      // Simulate an APIError shape: Error subclass with extra own properties.
+      const apiError = new Error('Request failed with status 404');
+      apiError.name = 'APIError';
+      (apiError as any).statusCode = 404;
+      (apiError as any).endpoint = 'https://example.com/?rest_route=/wp/v2/wpmcp';
+
+      log('WordPress request failed', LogLevel.ERROR, 'API', apiError);
+
+      expect(process.stderr.write).toHaveBeenCalledWith(
+        expect.stringMatching(/"message":\s*"Request failed with status 404"/)
+      );
+      expect(process.stderr.write).toHaveBeenCalledWith(
+        expect.stringMatching(/"statusCode":\s*404/)
+      );
+      expect(process.stderr.write).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /"endpoint":\s*"https:\/\/example\.com\/\?rest_route=\/wp\/v2\/wpmcp"/
+        )
       );
     });
 
@@ -238,7 +314,9 @@ describe('Utils Module', () => {
         (logger as any)[method](`${category} test message`);
 
         expect(process.stderr.write).toHaveBeenCalledWith(
-          expect.stringMatching(new RegExp(`\\[INFO\\] \\[${category}\\] ${category} test message\\n$`))
+          expect.stringMatching(
+            new RegExp(`\\[INFO\\] \\[${category}\\] ${category} test message\\n$`)
+          )
         );
       });
 

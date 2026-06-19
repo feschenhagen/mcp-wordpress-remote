@@ -190,7 +190,7 @@ export class MCPOAuthProvider {
             // Fetch protected resource metadata from the indicated URL
             const metadataResponse = await proxyFetch(authInfo.resource_metadata_url, {
               headers: {
-                'Accept': 'application/json',
+                Accept: 'application/json',
                 ...customHeaders,
               },
             });
@@ -231,6 +231,26 @@ export class MCPOAuthProvider {
   private async ensureClientRegistration(): Promise<void> {
     if (this.config.clientId) {
       logger.oauth('Using provided client ID, skipping dynamic registration');
+      return;
+    }
+
+    // Reuse a previously registered client if one is persisted for this server.
+    // Without this, every fresh process with no in-memory clientId would mint a
+    // brand-new DCR client and orphan the prior registration server-side.
+    //
+    // This intentionally runs before the OAUTH_DYNAMIC_REGISTRATION guard: that
+    // flag governs minting a *new* client, not reusing one already obtained. A
+    // persisted client_info.json is only ever written by a prior successful
+    // registration, so reusing it is not "performing registration" and remains
+    // valid even when new registration is disabled.
+    //
+    // The explicit string check (rather than a truthiness check) makes a
+    // corrupt-but-JSON-valid file (e.g. a non-string or empty client_id) fall
+    // through to registration instead of promoting a bad value into the auth URL.
+    const storedClientInfo = await readClientInfo(this.serverUrlHash);
+    if (typeof storedClientInfo?.client_id === 'string' && storedClientInfo.client_id.length > 0) {
+      this.config.clientId = storedClientInfo.client_id;
+      logger.oauth('Reusing persisted client registration, skipping dynamic registration');
       return;
     }
 
@@ -334,10 +354,9 @@ export class MCPOAuthProvider {
       await writeTextFile(this.serverUrlHash, 'oauth_state.txt', this.currentState);
 
       // Step 4: Set up callback server with smart port selection
-      const callbackPort = this.config.callbackPort === 0 
-        ? await getOAuthCallbackPort() 
-        : this.config.callbackPort;
-        
+      const callbackPort =
+        this.config.callbackPort === 0 ? await getOAuthCallbackPort() : this.config.callbackPort;
+
       const callbackServer = setupWPOAuthCallbackServer(
         {
           port: callbackPort,

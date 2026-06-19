@@ -35,7 +35,7 @@ OAUTH_FLOW_TYPE=implicit
 OAUTH_USE_PKCE=false
 
 # Your WordPress site URL
-WP_API_URL=https://your-wordpress-site.com
+WP_API_URL=https://your-wordpress-site.com/wp-json/mcp/mcp-adapter-default-server
 
 # OAuth client ID from your WordPress site
 WP_OAUTH_CLIENT_ID=your_client_id
@@ -60,7 +60,7 @@ Example configuration:
 ```bash
 OAUTH_ENABLED=true
 OAUTH_FLOW_TYPE=implicit
-WP_API_URL=https://your-wordpress-site.com
+WP_API_URL=https://your-wordpress-site.com/wp-json/mcp/mcp-adapter-default-server
 WP_OAUTH_CLIENT_ID=12345
 OAUTH_CALLBACK_PORT=7665
 ```
@@ -87,15 +87,18 @@ The implicit flow follows this process:
 ### Common Issues
 
 **"No access token received"**
+
 - Check that your OAuth client is configured correctly
 - Verify the redirect URI matches exactly
 - Ensure the WordPress site supports implicit flow
 
 **"Client ID not found"**
+
 - Verify `WP_OAUTH_CLIENT_ID` is set correctly
 - Check that the client exists in your WordPress OAuth settings
 
 **"Authorization failed"**
+
 - Check that the user has permission to authorize applications
 - Verify the OAuth plugin is active and configured
 - Check WordPress error logs for detailed error messages

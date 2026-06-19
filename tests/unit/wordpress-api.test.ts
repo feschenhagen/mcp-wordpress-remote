@@ -32,6 +32,25 @@ jest.unstable_mockModule('../../src/lib/coordination.js', () => ({
 // The WordPress MCP endpoint used by the source code
 const WP_MCP_ENDPOINT = '/?rest_route=/wp/v2/wpmcp';
 
+function createJsonRpcResult(id: number, result: any) {
+  return {
+    jsonrpc: '2.0',
+    id,
+    result,
+  };
+}
+
+function createJsonRpcError(id: number, code: number, message: string) {
+  return {
+    jsonrpc: '2.0',
+    id,
+    error: {
+      code,
+      message,
+    },
+  };
+}
+
 describe('WordPress API Module', () => {
   let restoreEnv: () => void;
 
@@ -85,9 +104,7 @@ describe('WordPress API Module', () => {
           JWT_TOKEN: 'test-jwt-token',
         });
 
-        nock('https://my-wp-site.com')
-          .post(WP_MCP_ENDPOINT)
-          .reply(200, { status: 'success' });
+        nock('https://my-wp-site.com').post(WP_MCP_ENDPOINT).reply(200, { status: 'success' });
 
         const { wpRequest } = await import('../../src/lib/wordpress-api.js');
         await wpRequest({ method: 'initialize' });
@@ -101,9 +118,7 @@ describe('WordPress API Module', () => {
           JWT_TOKEN: 'test-jwt-token',
         });
 
-        nock('https://my-wp-site.com')
-          .post('/custom/path')
-          .reply(200, { status: 'success' });
+        nock('https://my-wp-site.com').post('/custom/path').reply(200, { status: 'success' });
 
         const { wpRequest } = await import('../../src/lib/wordpress-api.js');
         await wpRequest({ method: 'initialize' });
@@ -117,9 +132,7 @@ describe('WordPress API Module', () => {
           JWT_TOKEN: 'test-jwt-token',
         });
 
-        nock('https://my-wp-site.com')
-          .post(WP_MCP_ENDPOINT)
-          .reply(200, { status: 'success' });
+        nock('https://my-wp-site.com').post(WP_MCP_ENDPOINT).reply(200, { status: 'success' });
 
         const { wpRequest } = await import('../../src/lib/wordpress-api.js');
         await wpRequest({ method: 'initialize' });
@@ -204,10 +217,12 @@ describe('WordPress API Module', () => {
 
           const { wpRequest } = await import('../../src/lib/wordpress-api.js');
 
-          await expect(wpRequest({
-            method: 'tools/call',
-            params: { name: 'wc_reports_sales' },
-          })).rejects.toThrow('Missing WooCommerce credentials');
+          await expect(
+            wpRequest({
+              method: 'tools/call',
+              params: { name: 'wc_reports_sales' },
+            })
+          ).rejects.toThrow('Missing WooCommerce credentials');
         });
       });
 
@@ -311,17 +326,359 @@ describe('WordPress API Module', () => {
 
         const expectedResponse = {
           status: 'success',
-          data: { tools: ['tool1', 'tool2'] }
+          data: { tools: ['tool1', 'tool2'] },
         };
 
-        nock('https://my-wp-site.com')
-          .post(WP_MCP_ENDPOINT)
-          .reply(200, expectedResponse);
+        nock('https://my-wp-site.com').post(WP_MCP_ENDPOINT).reply(200, expectedResponse);
 
         const { wpRequest } = await import('../../src/lib/wordpress-api.js');
         const response = await wpRequest({ method: 'tools/list' });
 
         expect(response).toEqual(expectedResponse);
+      });
+
+      it('should parse text/event-stream responses and extract the JSON-RPC result', async () => {
+        restoreEnv = mockEnv({
+          WP_API_URL: 'https://my-wp-site.com',
+          JWT_TOKEN: 'test-token',
+        });
+
+        const jsonRpcEnvelope = {
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            protocolVersion: '2025-06-18',
+            serverInfo: { name: 'Parker', version: '1.0.0' },
+            capabilities: {},
+          },
+        };
+        const sseBody =
+          `event: message\n` + `id: abc-123\n` + `data: ${JSON.stringify(jsonRpcEnvelope)}\n\n`;
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT)
+          .reply(200, sseBody, { 'Content-Type': 'text/event-stream' });
+
+        const { wpRequest } = await import('../../src/lib/wordpress-api.js');
+        const response = await wpRequest(
+          { jsonrpc: '2.0', method: 'initialize', id: 1, params: {} },
+          true
+        );
+
+        expect(response).toEqual(jsonRpcEnvelope.result);
+      });
+
+      it('should handle multi-line data fields in SSE responses', async () => {
+        restoreEnv = mockEnv({
+          WP_API_URL: 'https://my-wp-site.com',
+          JWT_TOKEN: 'test-token',
+        });
+
+        const payload = { jsonrpc: '2.0', id: 1, result: { ok: true } };
+        const json = JSON.stringify(payload, null, 2);
+        const sseBody =
+          `event: message\n` +
+          json
+            .split('\n')
+            .map(l => `data: ${l}`)
+            .join('\n') +
+          `\n\n`;
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT)
+          .reply(200, sseBody, { 'Content-Type': 'text/event-stream' });
+
+        const { wpRequest } = await import('../../src/lib/wordpress-api.js');
+        const response = await wpRequest(
+          { jsonrpc: '2.0', method: 'initialize', id: 1, params: {} },
+          true
+        );
+
+        expect(response).toEqual(payload.result);
+      });
+
+      it('should treat SSE frames with no event field as default "message" events', async () => {
+        restoreEnv = mockEnv({
+          WP_API_URL: 'https://my-wp-site.com',
+          JWT_TOKEN: 'test-token',
+        });
+
+        const jsonRpcEnvelope = {
+          jsonrpc: '2.0',
+          id: 1,
+          result: { ok: true },
+        };
+        // No `event:` field — per the SSE spec this is a default "message" event.
+        const sseBody = `data: ${JSON.stringify(jsonRpcEnvelope)}\n\n`;
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT)
+          .reply(200, sseBody, { 'Content-Type': 'text/event-stream' });
+
+        const { wpRequest } = await import('../../src/lib/wordpress-api.js');
+        const response = await wpRequest(
+          { jsonrpc: '2.0', method: 'initialize', id: 1, params: {} },
+          true
+        );
+
+        expect(response).toEqual(jsonRpcEnvelope.result);
+      });
+
+      it('should throw when SSE response contains no message event', async () => {
+        restoreEnv = mockEnv({
+          WP_API_URL: 'https://my-wp-site.com',
+          JWT_TOKEN: 'test-token',
+        });
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT)
+          .reply(200, ': keep-alive comment\n\n', { 'Content-Type': 'text/event-stream' });
+
+        const { wpRequest } = await import('../../src/lib/wordpress-api.js');
+
+        await expect(
+          wpRequest({ jsonrpc: '2.0', method: 'initialize', id: 1, params: {} }, true)
+        ).rejects.toThrow('No "message" event');
+      });
+
+      it('should refresh the session once and retry the original request', async () => {
+        restoreEnv = mockEnv({
+          WP_API_URL: 'https://my-wp-site.com',
+          JWT_TOKEN: 'test-token',
+        });
+
+        const initializeRequest = {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            clientInfo: {
+              name: 'test-client',
+              version: '1.0.0',
+            },
+            _proxy_request_id: 1,
+          },
+        };
+        const toolRequest = {
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/list',
+          params: {
+            cursor: 'abc123',
+          },
+        };
+        const promptRequest = {
+          jsonrpc: '2.0',
+          id: 3,
+          method: 'prompts/list',
+          params: {},
+        };
+
+        const initHeaders: Array<string | undefined> = [];
+        let initCallCount = 0;
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT, initializeRequest)
+          .twice()
+          .reply(function () {
+            const header = this.req.headers['mcp-session-id'];
+            initHeaders.push(Array.isArray(header) ? header[0] : (header as string | undefined));
+            initCallCount += 1;
+
+            return [
+              200,
+              createJsonRpcResult(1, { protocolVersion: '2025-06-18' }),
+              {
+                'Mcp-Session-Id': initCallCount === 1 ? 'session-1' : 'session-2',
+              },
+            ];
+          });
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT, toolRequest)
+          .matchHeader('mcp-session-id', 'session-1')
+          .reply(200, createJsonRpcError(2, -32602, 'Invalid or expired session'));
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT, toolRequest)
+          .matchHeader('mcp-session-id', 'session-2')
+          .reply(200, createJsonRpcResult(2, { tools: [{ name: 'posts-list' }] }));
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT, promptRequest)
+          .matchHeader('mcp-session-id', 'session-2')
+          .reply(200, createJsonRpcResult(3, { prompts: [] }));
+
+        const { wpRequest } = await import('../../src/lib/wordpress-api.js');
+
+        await wpRequest(initializeRequest, true);
+        await expect(wpRequest(toolRequest, true)).resolves.toEqual({
+          tools: [{ name: 'posts-list' }],
+        });
+        await expect(wpRequest(promptRequest, true)).resolves.toEqual({
+          prompts: [],
+        });
+
+        expect(initHeaders).toEqual([undefined, undefined]);
+        expect(nock.isDone()).toBe(true);
+      });
+
+      it('should refresh the session for WPCOM session-not-found errors returned as HTTP JSON-RPC responses', async () => {
+        restoreEnv = mockEnv({
+          WP_API_URL: 'https://public-api.wordpress.com/wpcom/v2/mcp/v1',
+          JWT_TOKEN: 'test-token',
+        });
+
+        const initializeRequest = {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            clientInfo: {
+              name: 'test-client',
+              version: '1.0.0',
+            },
+            _proxy_request_id: 1,
+          },
+        };
+        const toolRequest = {
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/call',
+          params: {
+            name: 'wpcom-mcp-account',
+            arguments: {
+              action: 'list',
+            },
+          },
+        };
+
+        const initHeaders: Array<string | undefined> = [];
+        let initCallCount = 0;
+
+        nock('https://public-api.wordpress.com')
+          .post('/wpcom/v2/mcp/v1', initializeRequest)
+          .twice()
+          .reply(function () {
+            const header = this.req.headers['mcp-session-id'];
+            initHeaders.push(Array.isArray(header) ? header[0] : (header as string | undefined));
+            initCallCount += 1;
+
+            return [
+              200,
+              createJsonRpcResult(1, { protocolVersion: '2025-06-18' }),
+              {
+                'Mcp-Session-Id': initCallCount === 1 ? 'session-1' : 'session-2',
+              },
+            ];
+          });
+
+        nock('https://public-api.wordpress.com')
+          .post('/wpcom/v2/mcp/v1', toolRequest)
+          .matchHeader('mcp-session-id', 'session-1')
+          .reply(
+            404,
+            createJsonRpcError(2, -32005, 'Session not found: Invalid or expired session')
+          );
+
+        nock('https://public-api.wordpress.com')
+          .post('/wpcom/v2/mcp/v1', toolRequest)
+          .matchHeader('mcp-session-id', 'session-2')
+          .reply(200, createJsonRpcResult(2, { content: [], structuredContent: {} }));
+
+        const { wpRequest } = await import('../../src/lib/wordpress-api.js');
+
+        await wpRequest(initializeRequest, true);
+        await expect(wpRequest(toolRequest, true)).resolves.toEqual({
+          content: [],
+          structuredContent: {},
+        });
+
+        expect(initHeaders).toEqual([undefined, undefined]);
+        expect(nock.isDone()).toBe(true);
+      });
+
+      it('should reuse a shared refresh when stale-session errors resolve out of order', async () => {
+        restoreEnv = mockEnv({
+          WP_API_URL: 'https://my-wp-site.com',
+          JWT_TOKEN: 'test-token',
+        });
+
+        const initializeRequest = {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            clientInfo: {
+              name: 'test-client',
+              version: '1.0.0',
+            },
+            _proxy_request_id: 1,
+          },
+        };
+        const toolsRequest = {
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/list',
+          params: {
+            cursor: 'first',
+          },
+        };
+        const promptsRequest = {
+          jsonrpc: '2.0',
+          id: 3,
+          method: 'prompts/list',
+          params: {},
+        };
+
+        let initCallCount = 0;
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT, initializeRequest)
+          .twice()
+          .reply(function () {
+            const header = this.req.headers['mcp-session-id'];
+            expect(header).toBeUndefined();
+            initCallCount += 1;
+
+            return [
+              200,
+              createJsonRpcResult(1, { protocolVersion: '2025-06-18' }),
+              {
+                'Mcp-Session-Id': initCallCount === 1 ? 'session-1' : 'session-2',
+              },
+            ];
+          });
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT, toolsRequest)
+          .matchHeader('mcp-session-id', 'session-1')
+          .reply(200, createJsonRpcError(2, -32602, 'Invalid or expired session'));
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT, promptsRequest)
+          .matchHeader('mcp-session-id', 'session-1')
+          .delay(25)
+          .reply(200, createJsonRpcError(3, -32602, 'Invalid or expired session'));
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT, toolsRequest)
+          .matchHeader('mcp-session-id', 'session-2')
+          .reply(200, createJsonRpcResult(2, { tools: [] }));
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT, promptsRequest)
+          .matchHeader('mcp-session-id', 'session-2')
+          .reply(200, createJsonRpcResult(3, { prompts: [] }));
+
+        const { wpRequest } = await import('../../src/lib/wordpress-api.js');
+
+        await wpRequest(initializeRequest, true);
+
+        await expect(
+          Promise.all([wpRequest(toolsRequest, true), wpRequest(promptsRequest, true)])
+        ).resolves.toEqual([{ tools: [] }, { prompts: [] }]);
+
+        expect(nock.isDone()).toBe(true);
       });
     });
 
@@ -332,9 +689,7 @@ describe('WordPress API Module', () => {
           JWT_TOKEN: 'test-token',
         });
 
-        nock('https://my-wp-site.com')
-          .post(WP_MCP_ENDPOINT)
-          .reply(401, 'Unauthorized');
+        nock('https://my-wp-site.com').post(WP_MCP_ENDPOINT).reply(401, 'Unauthorized');
 
         const { wpRequest } = await import('../../src/lib/wordpress-api.js');
 
@@ -349,15 +704,40 @@ describe('WordPress API Module', () => {
           JWT_TOKEN: 'test-token',
         });
 
-        nock('https://my-wp-site.com')
-          .post(WP_MCP_ENDPOINT)
-          .replyWithError('Network error');
+        nock('https://my-wp-site.com').post(WP_MCP_ENDPOINT).replyWithError('Network error');
 
         const { wpRequest } = await import('../../src/lib/wordpress-api.js');
 
-        await expect(wpRequest({ method: 'initialize' })).rejects.toThrow(
-          'Network error'
-        );
+        await expect(wpRequest({ method: 'initialize' })).rejects.toThrow('Network error');
+      });
+
+      it('should time out a slow request and report ETIMEDOUT', async () => {
+        // Regression for issue #61: an unbounded fetch let a stalled upstream
+        // hang the initialize handshake for ~60s. The request must now abort.
+        const timeoutMs = 80;
+        const replyDelay = timeoutMs + 50;
+        restoreEnv = mockEnv({
+          WP_API_URL: 'https://my-wp-site.com',
+          JWT_TOKEN: 'test-token',
+          WP_API_INIT_TIMEOUT_MS: String(timeoutMs),
+        });
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT)
+          .delay(replyDelay)
+          .reply(200, { status: 'success' });
+
+        const { wpRequest } = await import('../../src/lib/wordpress-api.js');
+        const { isAPIError } = await import('../../src/lib/oauth-types.js');
+
+        const error: any = await wpRequest({ method: 'initialize' }).catch((e: any) => e);
+        expect(isAPIError(error)).toBe(true);
+        expect(error.code).toBe('ETIMEDOUT');
+        expect(error.message).toMatch(/timed out after 80ms/);
+
+        // Let nock's delayed reply timer fire and clear before teardown so it
+        // doesn't leak into the worker (the request was already aborted).
+        await new Promise(resolve => setTimeout(resolve, replyDelay + 25));
       });
 
       it('should throw APIError for invalid JSON responses', async () => {
@@ -366,13 +746,151 @@ describe('WordPress API Module', () => {
           JWT_TOKEN: 'test-token',
         });
 
-        nock('https://my-wp-site.com')
-          .post(WP_MCP_ENDPOINT)
-          .reply(200, 'invalid json');
+        nock('https://my-wp-site.com').post(WP_MCP_ENDPOINT).reply(200, 'invalid json');
 
         const { wpRequest } = await import('../../src/lib/wordpress-api.js');
 
         await expect(wpRequest({ method: 'initialize' })).rejects.toThrow();
+      });
+
+      it('should not refresh the session for unrelated invalid-params errors', async () => {
+        restoreEnv = mockEnv({
+          WP_API_URL: 'https://my-wp-site.com',
+          JWT_TOKEN: 'test-token',
+        });
+
+        const initializeRequest = {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            clientInfo: {
+              name: 'test-client',
+              version: '1.0.0',
+            },
+            _proxy_request_id: 1,
+          },
+        };
+        const toolRequest = {
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/list',
+          params: {
+            cursor: 'bad-cursor',
+          },
+        };
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT, initializeRequest)
+          .reply(200, createJsonRpcResult(1, { protocolVersion: '2025-06-18' }), {
+            'Mcp-Session-Id': 'session-1',
+          });
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT, toolRequest)
+          .matchHeader('mcp-session-id', 'session-1')
+          .reply(200, createJsonRpcError(2, -32602, 'Cursor is invalid'));
+
+        const { wpRequest } = await import('../../src/lib/wordpress-api.js');
+
+        await wpRequest(initializeRequest, true);
+        await expect(wpRequest(toolRequest, true)).rejects.toThrow(
+          'WordPress JSON-RPC error: Cursor is invalid'
+        );
+
+        expect(nock.isDone()).toBe(true);
+      });
+
+      it('should not retry initialize requests when initialize itself returns an invalid session error', async () => {
+        restoreEnv = mockEnv({
+          WP_API_URL: 'https://my-wp-site.com',
+          JWT_TOKEN: 'test-token',
+        });
+
+        const initializeRequest = {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            clientInfo: {
+              name: 'test-client',
+              version: '1.0.0',
+            },
+            _proxy_request_id: 1,
+          },
+        };
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT, initializeRequest)
+          .reply(200, createJsonRpcError(1, -32602, 'Invalid or expired session'));
+
+        const { wpRequest } = await import('../../src/lib/wordpress-api.js');
+
+        await expect(wpRequest(initializeRequest, true)).rejects.toThrow(
+          'WordPress JSON-RPC error: Invalid or expired session'
+        );
+
+        expect(nock.isDone()).toBe(true);
+      });
+
+      it('should surface the invalid-session error after a single retry attempt', async () => {
+        restoreEnv = mockEnv({
+          WP_API_URL: 'https://my-wp-site.com',
+          JWT_TOKEN: 'test-token',
+        });
+
+        const initializeRequest = {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            clientInfo: {
+              name: 'test-client',
+              version: '1.0.0',
+            },
+            _proxy_request_id: 1,
+          },
+        };
+        const toolRequest = {
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/list',
+          params: {},
+        };
+
+        let initCallCount = 0;
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT, initializeRequest)
+          .twice()
+          .reply(function () {
+            initCallCount += 1;
+            return [
+              200,
+              createJsonRpcResult(1, { protocolVersion: '2025-06-18' }),
+              {
+                'Mcp-Session-Id': initCallCount === 1 ? 'session-1' : 'session-2',
+              },
+            ];
+          });
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT, toolRequest)
+          .matchHeader('mcp-session-id', 'session-1')
+          .reply(200, createJsonRpcError(2, -32602, 'Invalid or expired session'));
+
+        nock('https://my-wp-site.com')
+          .post(WP_MCP_ENDPOINT, toolRequest)
+          .matchHeader('mcp-session-id', 'session-2')
+          .reply(200, createJsonRpcError(2, -32602, 'Invalid or expired session'));
+
+        const { wpRequest } = await import('../../src/lib/wordpress-api.js');
+
+        await wpRequest(initializeRequest, true);
+        await expect(wpRequest(toolRequest, true)).rejects.toThrow(
+          'WordPress JSON-RPC error: Invalid or expired session'
+        );
+
+        expect(nock.isDone()).toBe(true);
       });
     });
 

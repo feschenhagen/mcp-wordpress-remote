@@ -4,11 +4,8 @@ import fs from 'fs/promises';
 import fsSync from 'fs';
 import crypto from 'crypto';
 import { logger } from './utils.js';
-import { CONFIG, MCP_WORDPRESS_REMOTE_VERSION } from './config.js';
+import { CONFIG, getMcpWordPressRemoteVersion } from './config.js';
 import { WPTokens, WPClientInfo, TokenValidationResult, LockfileData } from './oauth-types.js';
-
-// Use version from config for directory naming
-const VERSION = MCP_WORDPRESS_REMOTE_VERSION;
 
 /**
  * WordPress MCP Remote Authentication Configuration
@@ -71,8 +68,9 @@ export async function deleteLockfile(serverUrlHash: string): Promise<void> {
  */
 export function getConfigDir(): string {
   const baseConfigDir = CONFIG.WP_MCP_CONFIG_DIR;
-  // Add a version subdirectory so we don't need to worry about backwards/forwards compatibility
-  return path.join(baseConfigDir, `wordpress-remote-${VERSION}`);
+  // Version read at call-time: tsup flattens ESM and emits top-level `const` as `var`,
+  // which breaks TDZ and causes a module-top-level capture to resolve `undefined`.
+  return path.join(baseConfigDir, `wordpress-remote-${getMcpWordPressRemoteVersion()}`);
 }
 
 /**
@@ -297,11 +295,11 @@ export function isTokenValid(tokens: WPTokens): TokenValidationResult {
 
   // Optimized expiration check - avoid Math.floor until needed
   const now = Date.now();
-  const expiryTime = tokens.obtained_at + (tokens.expires_in * 1000);
-  
+  const expiryTime = tokens.obtained_at + tokens.expires_in * 1000;
+
   // Quick check with 60-second buffer for token refresh
-  const isExpiringSoon = now >= (expiryTime - 60000);
-  
+  const isExpiringSoon = now >= expiryTime - 60000;
+
   if (isExpiringSoon) {
     const expiresIn = Math.max(0, Math.floor((expiryTime - now) / 1000));
     return {
@@ -313,9 +311,9 @@ export function isTokenValid(tokens: WPTokens): TokenValidationResult {
 
   // Token is valid with plenty of time left
   const expiresIn = Math.floor((expiryTime - now) / 1000);
-  return { 
+  return {
     isValid: true,
-    expiresIn: Math.max(0, expiresIn)
+    expiresIn: Math.max(0, expiresIn),
   };
 }
 

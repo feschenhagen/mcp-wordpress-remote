@@ -3,11 +3,17 @@
  */
 import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { createParser } from 'eventsource-parser';
 import { WordPressRequestParams, WordPressResponse } from './types.js';
 import { logger, LogLevel } from './utils.js';
 import { CONFIG, validateConfig, getDefaultOAuthScopes, getCustomHeaders } from './config.js';
 import { proxyFetch } from './fetch-utils.js';
 import { WPTokens, AuthError, APIError } from './oauth-types.js';
+import {
+  extractNetworkErrorCode,
+  extractNetworkErrorMessage,
+  getConnectionErrorHint,
+} from './error-utils.js';
 import {
   getValidTokens,
   generateServerUrlHash,
@@ -32,6 +38,13 @@ let globalEvents: EventEmitter | null = null;
 
 // Global session ID received from WordPress server
 let globalSessionId: string | null = null;
+let lastInitializeRequest: { requestData: any; useJsonRpc: boolean } | null = null;
+let sessionRefreshPromise: Promise<void> | null = null;
+
+const WP_MCP_ENDPOINT = '/wp/v2/wpmcp';
+const INVALID_SESSION_ERROR_CODES = new Set([-32602, -32005]);
+const INVALID_SESSION_ERROR_MESSAGE = 'Invalid or expired session';
+const SESSION_NOT_FOUND_ERROR_MESSAGE = 'Session not found';
 
 function validateEnvironment() {
   const validation = validateConfig();
@@ -48,18 +61,52 @@ function removeTrailingSlash(url: string): string {
 }
 
 /**
+ * Parse an SSE (text/event-stream) response body and return the JSON payload
+ * from the first "message" event.
+ *
+ * Delegates SSE framing to `eventsource-parser` — the same library the MCP SDK
+ * uses in its Streamable HTTP transport — so edge cases (CRLF, multi-line data,
+ * comments, unknown fields) match spec and the SDK's behavior.
+ */
+function parseSSEMessage(text: string): unknown {
+  let result: unknown;
+  let found = false;
+
+  const parser = createParser({
+    onEvent(event) {
+      if (found) return;
+      // Per the SSE spec, an event with no `event:` field is a default "message".
+      // eventsource-parser leaves `event.event` as undefined in that case rather
+      // than defaulting to "message" like the browser EventSource API.
+      if (!event.event || event.event === 'message') {
+        result = JSON.parse(event.data);
+        found = true;
+      }
+    },
+  });
+
+  parser.feed(text);
+
+  if (!found) {
+    throw new Error('No "message" event with data found in SSE response');
+  }
+
+  return result;
+}
+
+/**
  * Determines if a URL has a custom path (beyond just domain) and constructs the final API URL
  * - If URL has no path (e.g., http://example.com or http://example.com/), use default REST route format
  * - If URL has a path (e.g., http://example.com/api/mcp), use the URL exactly as provided
  */
 function constructApiUrl(baseUrl: string, defaultEndpoint: string): string {
   const cleanUrl = removeTrailingSlash(baseUrl);
-  
+
   try {
     const urlObj = new URL(cleanUrl);
     const hasCustomPath = urlObj.pathname && urlObj.pathname !== '/' && urlObj.pathname.length > 0;
     const hasCustomQuery = urlObj.search && urlObj.search.length > 0;
-    
+
     if (hasCustomPath || hasCustomQuery) {
       // URL has a custom path or query strings - use it exactly as provided
       return cleanUrl;
@@ -124,10 +171,7 @@ async function getOAuthTokens(): Promise<WPTokens | null> {
       }
     } else {
       // Use legacy OAuth provider
-      logger.warn(
-        'Using legacy OAuth provider. Consider enabling PKCE for MCP compliance',
-        'AUTH'
-      );
+      logger.warn('Using legacy OAuth provider. Consider enabling PKCE for MCP compliance', 'AUTH');
 
       // Initialize coordinator for legacy flow
       if (!authCoordinator) {
@@ -171,14 +215,84 @@ export function getSessionId(): string | null {
   return globalSessionId;
 }
 
-export async function wpRequest(
-  requestData: any,
-  useJsonRpc: boolean = true
-): Promise<WordPressResponse> {
-  // Validate environment variables first
-  validateEnvironment();
+function getCurrentApiUrl(): string {
+  return process.env.WP_API_URL || CONFIG.WP_API_URL;
+}
 
-  const endpoint = '/wp/v2/wpmcp'; // WordPress MCP endpoint
+function getRequestUrl(): string {
+  return constructApiUrl(getCurrentApiUrl(), WP_MCP_ENDPOINT);
+}
+
+function cloneRequestData<T>(requestData: T): T {
+  return JSON.parse(JSON.stringify(requestData)) as T;
+}
+
+function isInitializeRequest(requestData: any): boolean {
+  return requestData?.method === 'initialize';
+}
+
+function cacheInitializeRequest(requestData: any, useJsonRpc: boolean): void {
+  lastInitializeRequest = {
+    requestData: cloneRequestData(requestData),
+    useJsonRpc,
+  };
+}
+
+function parseApiErrorResponse(error: APIError): any {
+  if (!error.response) {
+    return null;
+  }
+
+  if (typeof error.response === 'string') {
+    try {
+      return JSON.parse(error.response);
+    } catch {
+      return null;
+    }
+  }
+
+  return error.response;
+}
+
+function isInvalidSessionError(error: APIError): boolean {
+  const errorResponse = parseApiErrorResponse(error);
+  const jsonRpcError =
+    errorResponse?.error && typeof errorResponse.error === 'object'
+      ? errorResponse.error
+      : errorResponse;
+  const code = typeof jsonRpcError?.code === 'number' ? jsonRpcError.code : null;
+  const message = typeof jsonRpcError?.message === 'string' ? jsonRpcError.message : '';
+
+  return (
+    code !== null &&
+    INVALID_SESSION_ERROR_CODES.has(code) &&
+    (message === INVALID_SESSION_ERROR_MESSAGE ||
+      message.includes(SESSION_NOT_FOUND_ERROR_MESSAGE) ||
+      message.includes(INVALID_SESSION_ERROR_MESSAGE))
+  );
+}
+
+function updateSessionId(sessionId: string): void {
+  if (globalSessionId === sessionId) {
+    return;
+  }
+
+  globalSessionId = sessionId;
+  logger.info(`Session ID received from WordPress: ${globalSessionId}`, 'SESSION');
+}
+
+interface RequestExecutionResult {
+  responseData: WordPressResponse;
+  sessionIdUsed: string | null;
+}
+
+async function executeWordPressRequest(
+  requestData: any,
+  useJsonRpc: boolean,
+  sessionIdUsed: string | null
+): Promise<RequestExecutionResult> {
+  const url = getRequestUrl();
+
   const method = 'POST';
 
   // Log the request parameters for debugging
@@ -221,15 +335,11 @@ export async function wpRequest(
 
     // Determine method and tool name based on transport type
     const method = useJsonRpc ? requestData.method : requestData.method;
-    const toolName = useJsonRpc 
-      ? (requestData.params?.name || requestData.params?.tool)
-      : (requestData.name || requestData.tool || requestData.args?.tool);
+    const toolName = useJsonRpc
+      ? requestData.params?.name || requestData.params?.tool
+      : requestData.name || requestData.tool || requestData.args?.tool;
 
-    if (
-      method === 'tools/call' &&
-      toolName &&
-      toolName.startsWith('wc_reports_')
-    ) {
+    if (method === 'tools/call' && toolName && toolName.startsWith('wc_reports_')) {
       // Use WooCommerce credentials for WooCommerce report tools
       username = CONFIG.WOO_CUSTOMER_KEY!;
       password = CONFIG.WOO_CUSTOMER_SECRET!;
@@ -273,19 +383,14 @@ export async function wpRequest(
     );
   }
 
-  // Get current API URL from environment (to handle dynamic changes)
-  const currentApiUrl = process.env.WP_API_URL || CONFIG.WP_API_URL;
-  
   logger.debug(`Environment: ${CONFIG.NODE_ENV}`, 'API');
-  logger.debug(`Base API URL: ${currentApiUrl}`, 'API');
-
-  // Construct the final API URL based on whether the base URL has a custom path
-  const url = constructApiUrl(currentApiUrl, endpoint);
+  logger.debug(`Base API URL: ${getCurrentApiUrl()}`, 'API');
   logger.debug(`Final requesting URL: ${url}`, 'API');
 
   // Build headers object - only add Authorization if we have one
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
     'MCP-Protocol-Version': '2025-06-18', // MCP protocol version
     ...customHeaders, // Merge custom headers
   };
@@ -295,10 +400,9 @@ export async function wpRequest(
     headers.Authorization = authHeader;
   }
 
-  // Add session ID header if available (for MCP compliance)
-  // Session ID will be set after we receive it from WordPress initialize response
-  if (globalSessionId) {
-    headers['Mcp-Session-Id'] = globalSessionId;
+  // Add session ID header if available for this request
+  if (sessionIdUsed) {
+    headers['Mcp-Session-Id'] = sessionIdUsed;
   }
 
   // Log authentication method being used
@@ -316,43 +420,60 @@ export async function wpRequest(
     }
   }
 
+  // Bound the request so a stalled upstream fails fast with a clear error
+  // instead of hanging until the OS TCP timeout. The initialize handshake —
+  // what the MCP client waits on at startup — gets the tighter budget.
+  const timeoutMs = isInitializeRequest(requestData)
+    ? CONFIG.WP_API_INIT_TIMEOUT
+    : CONFIG.WP_API_TIMEOUT;
+
   const fetchOptions: RequestInit = {
     method,
     headers,
     body: JSON.stringify(requestData),
+    signal: AbortSignal.timeout(timeoutMs),
   };
 
   try {
     logger.api('Sending request to WordPress API...');
     logger.debug(`Request URL: ${url}`, 'API');
-    logger.debug(`Request method: ${method}`, 'API');
+    logger.debug(`Request method: ${method} (timeout ${timeoutMs}ms)`, 'API');
     const response = await proxyFetch(url, fetchOptions);
     logger.debug(`Response status: ${response.status}`, 'API');
 
+    const rawBody = await response.text();
+
     // Handle error responses
     if (!response.ok) {
-      const errorText = await response.text();
-      logger.error(`API error response: ${errorText}`, 'API');
+      logger.error(`API error response: ${rawBody}`, 'API');
       throw new APIError(
-        `WordPress API error (${response.status}): ${errorText}`,
+        `WordPress API error (${response.status}): ${rawBody}`,
         response.status,
         url,
-        errorText
+        rawBody
       );
     }
 
-    const responseData = await response.json();
-    
-    // Extract session ID from response headers (for initialize requests)
-    const sessionIdHeader = response.headers.get('Mcp-Session-Id');
-    if (sessionIdHeader && !globalSessionId) {
-      globalSessionId = sessionIdHeader;
-      logger.info(`Session ID received from WordPress: ${globalSessionId}`, 'SESSION');
+    // MCP Streamable HTTP transport may respond with either application/json
+    // (single-shot) or text/event-stream (SSE frames). Branch on Content-Type.
+    const contentType = response.headers.get('content-type') ?? '';
+    let responseData: unknown;
+    if (contentType.includes('text/event-stream')) {
+      responseData = parseSSEMessage(rawBody);
+      logger.debug('Parsed text/event-stream response body', 'API');
+    } else {
+      responseData = JSON.parse(rawBody);
     }
-    
+
+    // Accept session updates whenever WordPress provides one.
+    const sessionIdHeader = response.headers.get('Mcp-Session-Id');
+    if (sessionIdHeader) {
+      updateSessionId(sessionIdHeader);
+    }
+
     logger.api('Response received successfully');
     logger.debug(`Response data: ${JSON.stringify(responseData)}`, 'API');
-    
+
     // Handle response format based on transport type
     if (useJsonRpc && responseData && typeof responseData === 'object') {
       const jsonrpcResponse = responseData as any; // Type assertion for JSON-RPC response
@@ -365,24 +486,144 @@ export async function wpRequest(
             `WordPress JSON-RPC error: ${jsonrpcResponse.error.message}`,
             jsonrpcResponse.error.code || 500,
             url,
-            JSON.stringify(jsonrpcResponse.error)
+            jsonrpcResponse.error
           );
         } else if (jsonrpcResponse.result !== undefined) {
           // Extract result from JSON-RPC response
-          return jsonrpcResponse.result as WordPressResponse;
+          return {
+            responseData: jsonrpcResponse.result as WordPressResponse,
+            sessionIdUsed,
+          };
         }
       }
     }
-    
+
     // For simple transport or non-JSON-RPC responses, return response as-is
-    return responseData as WordPressResponse;
+    return {
+      responseData: responseData as WordPressResponse,
+      sessionIdUsed,
+    };
   } catch (error) {
     if (error instanceof APIError) {
       throw error;
     }
 
+    // Below-HTTP failure (TLS, DNS, refused, timeout). Surface the underlying
+    // code and an actionable hint so the cause is never swallowed.
+    // AbortSignal.timeout rejects with a DOMException named "TimeoutError"
+    // (node-fetch uses "AbortError"). DOMException is not `instanceof Error` in
+    // Node, so match on the name directly. Normalize to ETIMEDOUT so it carries
+    // a meaningful code and hint.
+    const errorName = (error as { name?: unknown })?.name;
+    const isTimeout = errorName === 'TimeoutError' || errorName === 'AbortError';
+    const code = isTimeout ? 'ETIMEDOUT' : extractNetworkErrorCode(error);
+    const hint = getConnectionErrorHint(code);
+    // Prefer the deepest cause message so a TLS detail ("unable to verify the
+    // first certificate") survives instead of undici's generic "fetch failed".
+    const errorMessage = isTimeout
+      ? `WordPress API request timed out after ${timeoutMs}ms`
+      : extractNetworkErrorMessage(error);
+    logger.error(`Error in wpRequest: ${errorMessage}${code ? ` (${code})` : ''}`, 'API');
+    if (hint) {
+      logger.error(hint, 'API');
+    }
+    throw new APIError(errorMessage, 0, url, undefined, code);
+  }
+}
+
+async function refreshSession(failedSessionId: string | null): Promise<void> {
+  if (failedSessionId && globalSessionId && globalSessionId !== failedSessionId) {
+    logger.info(
+      'Detected newer session while handling invalid-session error; skipping refresh',
+      'SESSION'
+    );
+    return;
+  }
+
+  if (sessionRefreshPromise) {
+    logger.info('Waiting for in-flight WordPress session refresh', 'SESSION');
+    await sessionRefreshPromise;
+    return;
+  }
+
+  if (!lastInitializeRequest) {
+    throw new APIError(
+      'Cannot refresh WordPress session before initialize has completed',
+      0,
+      getRequestUrl()
+    );
+  }
+
+  sessionRefreshPromise = (async () => {
+    logger.warn('WordPress session rejected; refreshing session via initialize', 'SESSION');
+    globalSessionId = null;
+
+    await executeWordPressRequest(
+      lastInitializeRequest.requestData,
+      lastInitializeRequest.useJsonRpc,
+      null
+    );
+
+    if (!globalSessionId) {
+      throw new APIError(
+        'WordPress initialize did not return a session ID during refresh',
+        0,
+        getRequestUrl()
+      );
+    }
+  })();
+
+  try {
+    await sessionRefreshPromise;
+  } finally {
+    sessionRefreshPromise = null;
+  }
+}
+
+export async function wpRequest(
+  requestData: any,
+  useJsonRpc: boolean = true,
+  options: { allowSessionRecovery?: boolean } = {}
+): Promise<WordPressResponse> {
+  // Validate environment variables first
+  validateEnvironment();
+
+  const allowSessionRecovery = options.allowSessionRecovery !== false;
+
+  if (isInitializeRequest(requestData)) {
+    cacheInitializeRequest(requestData, useJsonRpc);
+  }
+
+  const sessionIdUsed = globalSessionId;
+
+  try {
+    const result = await executeWordPressRequest(requestData, useJsonRpc, sessionIdUsed);
+    return result.responseData;
+  } catch (error) {
+    if (
+      error instanceof APIError &&
+      allowSessionRecovery &&
+      !isInitializeRequest(requestData) &&
+      isInvalidSessionError(error)
+    ) {
+      logger.warn('WordPress session expired; attempting one-time recovery', 'SESSION', {
+        method: requestData?.method || 'unknown',
+        sessionIdUsed: sessionIdUsed || 'none',
+      });
+
+      await refreshSession(sessionIdUsed);
+
+      const retriedResult = await executeWordPressRequest(requestData, useJsonRpc, globalSessionId);
+      return retriedResult.responseData;
+    }
+
+    if (error instanceof APIError) {
+      throw error;
+    }
+
+    const code = extractNetworkErrorCode(error);
     const errorMessage = error instanceof Error ? error.message : String(error);
-    logger.error(`Error in wpRequest: ${errorMessage}`, 'API');
-    throw new APIError(errorMessage, 0, url);
+    logger.error(`Error in wpRequest: ${errorMessage}${code ? ` (${code})` : ''}`, 'API');
+    throw new APIError(errorMessage, 0, getRequestUrl(), undefined, code);
   }
 }

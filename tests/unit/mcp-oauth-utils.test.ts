@@ -8,7 +8,7 @@ describe('MCP OAuth Utils', () => {
   describe('generatePKCE', () => {
     it('should generate valid PKCE data', async () => {
       const { generatePKCE } = await import('../../src/lib/mcp-oauth-utils.js');
-      
+
       const pkce = generatePKCE();
 
       expect(pkce).toHaveProperty('codeVerifier');
@@ -30,7 +30,7 @@ describe('MCP OAuth Utils', () => {
 
     it('should generate different PKCE data on each call', async () => {
       const { generatePKCE } = await import('../../src/lib/mcp-oauth-utils.js');
-      
+
       const pkce1 = generatePKCE();
       const pkce2 = generatePKCE();
 
@@ -55,46 +55,48 @@ describe('MCP OAuth Utils', () => {
     it('should normalize basic URLs correctly', async () => {
       const { generateCanonicalResourceURI } = await import('../../src/lib/mcp-oauth-utils.js');
 
-      expect(generateCanonicalResourceURI('https://Example.Com/Path'))
-        .toBe('https://example.com/Path');
+      expect(generateCanonicalResourceURI('https://Example.Com/Path')).toBe(
+        'https://example.com/Path'
+      );
     });
 
     it('should remove fragments', async () => {
       const { generateCanonicalResourceURI } = await import('../../src/lib/mcp-oauth-utils.js');
 
-      expect(generateCanonicalResourceURI('https://example.com/path#fragment'))
-        .toBe('https://example.com/path');
+      expect(generateCanonicalResourceURI('https://example.com/path#fragment')).toBe(
+        'https://example.com/path'
+      );
     });
 
     it('should handle trailing slashes appropriately', async () => {
       const { generateCanonicalResourceURI } = await import('../../src/lib/mcp-oauth-utils.js');
 
-      expect(generateCanonicalResourceURI('https://example.com/'))
-        .toBe('https://example.com/'); // Root slash is preserved
-      
-      expect(generateCanonicalResourceURI('https://example.com/path/'))
-        .toBe('https://example.com/path');
+      expect(generateCanonicalResourceURI('https://example.com/')).toBe('https://example.com/'); // Root slash is preserved
+
+      expect(generateCanonicalResourceURI('https://example.com/path/')).toBe(
+        'https://example.com/path'
+      );
     });
 
     it('should preserve query parameters', async () => {
       const { generateCanonicalResourceURI } = await import('../../src/lib/mcp-oauth-utils.js');
 
-      expect(generateCanonicalResourceURI('https://example.com/path?query=value'))
-        .toBe('https://example.com/path?query=value');
+      expect(generateCanonicalResourceURI('https://example.com/path?query=value')).toBe(
+        'https://example.com/path?query=value'
+      );
     });
 
     it('should handle invalid URLs gracefully', async () => {
       const { generateCanonicalResourceURI } = await import('../../src/lib/mcp-oauth-utils.js');
 
-      expect(() => generateCanonicalResourceURI('invalid-url'))
-        .toThrow();
+      expect(() => generateCanonicalResourceURI('invalid-url')).toThrow();
     });
   });
 
   describe('generateSecureState', () => {
     it('should generate a valid state parameter', async () => {
       const { generateSecureState } = await import('../../src/lib/mcp-oauth-utils.js');
-      
+
       const state = generateSecureState();
 
       expect(typeof state).toBe('string');
@@ -104,7 +106,7 @@ describe('MCP OAuth Utils', () => {
 
     it('should generate different state values on each call', async () => {
       const { generateSecureState } = await import('../../src/lib/mcp-oauth-utils.js');
-      
+
       const state1 = generateSecureState();
       const state2 = generateSecureState();
 
@@ -115,7 +117,7 @@ describe('MCP OAuth Utils', () => {
   describe('parseWWWAuthenticateHeader', () => {
     it('should parse basic WWW-Authenticate header', async () => {
       const { parseWWWAuthenticateHeader } = await import('../../src/lib/mcp-oauth-utils.js');
-      
+
       const header = 'Bearer realm="WordPress API", error="invalid_token"';
       const parsed = parseWWWAuthenticateHeader(header);
 
@@ -126,8 +128,9 @@ describe('MCP OAuth Utils', () => {
 
     it('should handle complex WWW-Authenticate headers', async () => {
       const { parseWWWAuthenticateHeader } = await import('../../src/lib/mcp-oauth-utils.js');
-      
-      const header = 'Bearer realm="API", scope="read write", error="insufficient_scope", error_description="The request requires higher privileges"';
+
+      const header =
+        'Bearer realm="API", scope="read write", error="insufficient_scope", error_description="The request requires higher privileges"';
       const parsed = parseWWWAuthenticateHeader(header);
 
       expect(parsed.scheme).toBe('Bearer');
@@ -139,7 +142,7 @@ describe('MCP OAuth Utils', () => {
 
     it('should handle headers without quotes by not parsing unquoted values', async () => {
       const { parseWWWAuthenticateHeader } = await import('../../src/lib/mcp-oauth-utils.js');
-      
+
       const header = 'Bearer error=invalid_token';
       const parsed = parseWWWAuthenticateHeader(header);
 
@@ -149,7 +152,7 @@ describe('MCP OAuth Utils', () => {
 
     it('should handle malformed headers gracefully', async () => {
       const { parseWWWAuthenticateHeader } = await import('../../src/lib/mcp-oauth-utils.js');
-      
+
       const header = 'Invalid Header Format';
       const parsed = parseWWWAuthenticateHeader(header);
 
@@ -160,7 +163,7 @@ describe('MCP OAuth Utils', () => {
   describe('buildAuthorizationUrl', () => {
     it('should build a proper authorization URL', async () => {
       const { buildAuthorizationUrl } = await import('../../src/lib/mcp-oauth-utils.js');
-      
+
       const url = buildAuthorizationUrl(
         'https://example.com/oauth2/authorize',
         'test_client_id',
@@ -186,7 +189,7 @@ describe('MCP OAuth Utils', () => {
   describe('validateTokenAudience', () => {
     it('should validate token audience correctly', async () => {
       const { validateTokenAudience } = await import('../../src/lib/mcp-oauth-utils.js');
-      
+
       const token = {
         access_token: 'test_token',
         audience: 'https://api.example.com',
@@ -198,7 +201,7 @@ describe('MCP OAuth Utils', () => {
 
     it('should handle tokens without audience', async () => {
       const { validateTokenAudience } = await import('../../src/lib/mcp-oauth-utils.js');
-      
+
       const token = {
         access_token: 'test_token',
       };

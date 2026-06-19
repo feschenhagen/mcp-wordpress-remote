@@ -16,6 +16,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import { once } from 'events';
 import { join } from 'path';
+import { InitializeResultSchema } from '@modelcontextprotocol/sdk/types.js';
 
 const PROXY_PATH = join(process.cwd(), 'dist/proxy.js');
 
@@ -34,7 +35,11 @@ function collectMessages(proc: ChildProcess, count: number, ms = 15_000): Promis
     let buffer = '';
     const timer = setTimeout(() => {
       cleanup();
-      reject(new Error(`Timed out after ${ms}ms waiting for ${count} message(s), got ${messages.length}: ${JSON.stringify(messages)}`));
+      reject(
+        new Error(
+          `Timed out after ${ms}ms waiting for ${count} message(s), got ${messages.length}: ${JSON.stringify(messages)}`
+        )
+      );
     }, ms);
 
     function onData(chunk: Buffer) {
@@ -83,7 +88,7 @@ describe('dead backend integration', () => {
         ...process.env,
         WP_API_URL: 'http://192.0.2.1:1',
         JWT_TOKEN: 'test-dead-backend-token',
-        LOG_LEVEL: '0',     // suppress logs on stderr
+        LOG_LEVEL: '0', // suppress logs on stderr
         NODE_ENV: 'test',
       },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -114,14 +119,28 @@ describe('dead backend integration', () => {
     expect(initResponse).toHaveProperty('id', 1);
     expect(initResponse.result).toBeDefined();
 
-    // Fallback response should have empty capabilities (no tools to list)
+    // The dead connection advertises NO real capabilities — listing tools/
+    // logging/etc. would make an eager client call them during setup and fail
+    // before it can read the degraded flag.
     const caps = initResponse.result.capabilities;
-    expect(caps.tools).toEqual({});
-    expect(caps.resources).toEqual({});
-    expect(caps.prompts).toEqual({});
+    expect(caps.tools).toBeUndefined();
+    expect(caps.resources).toBeUndefined();
+    expect(caps.prompts).toBeUndefined();
+    expect(caps.logging).toBeUndefined();
+    expect(caps.completions).toBeUndefined();
 
     // Instructions should indicate failure
     expect(initResponse.result.instructions).toMatch(/Connection Failed/i);
+
+    // Clients can detect the degraded state programmatically (issue #61)
+    // instead of string-matching the instructions field. The value must be an
+    // object — the MCP ServerCapabilities schema rejects a boolean here.
+    expect(caps.experimental?.connectionFailed).toBeDefined();
+    expect(typeof caps.experimental.connectionFailed).toBe('object');
+
+    // The fallback initialize result must satisfy the SDK schema, or a strict
+    // client would reject the degraded handshake outright.
+    expect(() => InitializeResultSchema.parse(initResponse.result)).not.toThrow();
 
     // 2. Send initialized notification (required by MCP protocol before requests)
     send(proxy, {
@@ -146,7 +165,14 @@ describe('dead backend integration', () => {
     // The response must be a clean MCP error, NOT a forwarded malformed request.
     // The init-ready gate should have caught this and returned an error.
     expect(toolsResponse.error).toBeDefined();
-    expect(toolsResponse.error.message).toMatch(/WordPress connection failed during initialization/);
+    expect(toolsResponse.error.message).toMatch(
+      /WordPress connection failed during initialization/
+    );
+
+    // The error must carry the underlying cause in `data` so the client can
+    // explain why init failed, rather than a bare internal error (issue #61).
+    expect(toolsResponse.error.data).toBeDefined();
+    expect(toolsResponse.error.data.reason).toBe('failed');
   }, 30_000);
 
   // Healthy-backend integration test omitted: unit tests cover the happy path.

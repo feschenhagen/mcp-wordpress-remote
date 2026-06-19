@@ -60,6 +60,26 @@ const readPackageVersion = (): string => {
 
 export const MCP_WORDPRESS_REMOTE_VERSION = readPackageVersion();
 
+export function getMcpWordPressRemoteVersion(): string {
+  return MCP_WORDPRESS_REMOTE_VERSION;
+}
+
+/**
+ * Parse a positive integer from an environment variable, falling back to a
+ * default when unset, non-numeric, or not greater than zero.
+ *
+ * @param value        - Raw environment variable value.
+ * @param defaultValue - Fallback when the value is missing or invalid.
+ * @returns A positive integer.
+ */
+function parsePositiveIntEnv(value: string | undefined, defaultValue: number): number {
+  if (!value) {
+    return defaultValue;
+  }
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
+}
+
 /**
  * Centralized configuration for MCP WordPress Remote
  * All default values are defined here and can be overridden via environment variables
@@ -99,6 +119,15 @@ export const CONFIG = {
   // Timeout Configuration (in milliseconds)
   OAUTH_TIMEOUT: 30000, // 30 seconds
   LOCK_TIMEOUT: 300000, // 5 minutes
+
+  // WordPress request timeouts. Native fetch has no default timeout, so a
+  // stalled upstream (TLS handshake hang, blackholed route, dead proxy) would
+  // otherwise hang until the OS TCP timeout (~60s+). These bound the wait so
+  // the failure surfaces quickly with a clear error instead of silently.
+  // The initialize handshake should be fast and is what the MCP client waits
+  // on at startup, so it gets a tighter budget than regular tool calls.
+  WP_API_TIMEOUT: parsePositiveIntEnv(process.env.WP_API_TIMEOUT_MS, 120000), // 2 minutes
+  WP_API_INIT_TIMEOUT: parsePositiveIntEnv(process.env.WP_API_INIT_TIMEOUT_MS, 25000), // 25 seconds
 
   // Directory Configuration
   WP_MCP_CONFIG_DIR: process.env.WP_MCP_CONFIG_DIR || path.join(os.homedir(), '.mcp-auth'),
@@ -162,6 +191,12 @@ export const getConfig = () => ({
 
   /** Lock operation timeout in milliseconds */
   lockTimeout: CONFIG.LOCK_TIMEOUT,
+
+  /** WordPress request timeout in milliseconds (tool calls and non-init requests) */
+  wpApiTimeout: CONFIG.WP_API_TIMEOUT,
+
+  /** WordPress initialize handshake timeout in milliseconds */
+  wpApiInitTimeout: CONFIG.WP_API_INIT_TIMEOUT,
 
   /** Configuration directory path */
   configDir: CONFIG.WP_MCP_CONFIG_DIR,

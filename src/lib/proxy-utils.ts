@@ -3,7 +3,7 @@
  *
  * Supports:
  * - macOS: Automatic PAC file detection from system proxy settings
- * - macOS: System SOCKS proxy detection (AutoProxxy Tunnel All Traffic)
+ * - macOS: System SOCKS proxy detection (manual "tunnel all traffic" config)
  * - All platforms: Environment variables (SOCKS_PROXY, HTTPS_PROXY, etc.)
  */
 
@@ -99,8 +99,8 @@ export function shouldBypassProxy(targetUrl: string): boolean {
 
   const rules = noProxy
     .split(',')
-    .map((r) => r.trim().toLowerCase())
-    .filter((r) => r.length > 0);
+    .map(r => r.trim().toLowerCase())
+    .filter(r => r.length > 0);
 
   for (const rule of rules) {
     if (rule === '*') return true;
@@ -145,16 +145,26 @@ export function detectEnvProxy(): { url: string; type: 'socks' | 'http' } | null
 }
 
 /**
+ * Detector for macOS system proxy settings. Injectable so the precedence
+ * logic in doInitializeProxy() can be tested without shelling out to scutil.
+ */
+type MacOsProxyDetector = () => MacOsProxyInfo | null;
+
+/**
  * Initialize proxy configuration (call once at startup)
  * Guards against concurrent initialization calls
+ *
+ * @param detectMacOs - Optional override for macOS proxy detection (testing seam)
  */
-export async function initializeProxy(): Promise<void> {
+export async function initializeProxy(
+  detectMacOs: MacOsProxyDetector = detectMacOsProxy
+): Promise<void> {
   // Return existing promise if initialization is already in progress
   if (initializationPromise) {
     return initializationPromise;
   }
 
-  initializationPromise = doInitializeProxy().catch((error) => {
+  initializationPromise = doInitializeProxy(detectMacOs).catch(error => {
     initializationPromise = null;
     throw error;
   });
@@ -164,11 +174,28 @@ export async function initializeProxy(): Promise<void> {
 /**
  * Internal initialization logic
  */
-async function doInitializeProxy(): Promise<void> {
-  // 1. Try macOS system proxy (single scutil call for both PAC and SOCKS)
-  const macProxy = detectMacOsProxy();
+async function doInitializeProxy(detectMacOs: MacOsProxyDetector): Promise<void> {
+  // 1. Explicit environment proxy takes precedence over auto-detected system
+  //    proxies. Setting SOCKS_PROXY/HTTPS_PROXY/ALL_PROXY/HTTP_PROXY is a
+  //    deliberate operator choice — including the URL scheme. The scheme
+  //    matters: socks5:// resolves destination hostnames client-side, while
+  //    socks5h:// defers resolution to the proxy. An auto-detected system PAC
+  //    would otherwise be consulted first and could synthesize a different
+  //    scheme, overriding the operator's explicit choice and changing which
+  //    side performs DNS. Honoring the explicit value verbatim, before the
+  //    system PAC, follows the precedence convention used by curl, git, and
+  //    most HTTP clients.
+  const envProxy = detectEnvProxy();
+  if (envProxy) {
+    proxyConfig = { type: 'env', envProxy };
+    logger.info(`Proxy configured from environment: ${sanitizeProxyUrl(envProxy.url)}`, 'PROXY');
+    return;
+  }
 
-  // 1a. PAC file
+  // 2. Try macOS system proxy (single scutil call for both PAC and SOCKS)
+  const macProxy = detectMacOs();
+
+  // 2a. PAC file
   if (macProxy?.pacUrl) {
     try {
       // Fetch PAC file directly (not through proxy)
@@ -194,21 +221,13 @@ async function doInitializeProxy(): Promise<void> {
     }
   }
 
-  // 1b. SOCKS proxy (e.g. AutoProxxy "Tunnel All Traffic")
+  // 2b. System SOCKS proxy (manual "tunnel all traffic" configuration)
   if (macProxy?.socks) {
     const { host, port } = macProxy.socks;
     const bracketedHost = host.includes(':') ? `[${host}]` : host;
-    const socksUrl = `socks5://${bracketedHost}:${port}`;
+    const socksUrl = `socks5h://${bracketedHost}:${port}`;
     proxyConfig = { type: 'env', envProxy: { url: socksUrl, type: 'socks' } };
     logger.info(`System SOCKS proxy configured: ${sanitizeProxyUrl(socksUrl)}`, 'PROXY');
-    return;
-  }
-
-  // 2. Try environment variables (all platforms)
-  const envProxy = detectEnvProxy();
-  if (envProxy) {
-    proxyConfig = { type: 'env', envProxy };
-    logger.info(`Proxy configured from environment: ${sanitizeProxyUrl(envProxy.url)}`, 'PROXY');
     return;
   }
 
@@ -251,8 +270,11 @@ export async function getAgentForUrl(url: string): Promise<ProxyAgent | undefine
         // Parse "SOCKS host:port" or "SOCKS5 host:port" (case-insensitive)
         const socksMatch = directive.match(/SOCKS5?\s+(\S+):(\d+)/i);
         if (socksMatch) {
-          const proxyUrl = `socks5://${socksMatch[1]}:${socksMatch[2]}`;
-          logger.debug(`PAC returned SOCKS proxy for ${url}: ${sanitizeProxyUrl(proxyUrl)}`, 'PROXY');
+          const proxyUrl = `socks5h://${socksMatch[1]}:${socksMatch[2]}`;
+          logger.debug(
+            `PAC returned SOCKS proxy for ${url}: ${sanitizeProxyUrl(proxyUrl)}`,
+            'PROXY'
+          );
           return new SocksProxyAgent(proxyUrl);
         }
 
@@ -260,7 +282,10 @@ export async function getAgentForUrl(url: string): Promise<ProxyAgent | undefine
         const proxyMatch = directive.match(/PROXY\s+(\S+):(\d+)/i);
         if (proxyMatch) {
           const proxyUrl = `http://${proxyMatch[1]}:${proxyMatch[2]}`;
-          logger.debug(`PAC returned HTTP proxy for ${url}: ${sanitizeProxyUrl(proxyUrl)}`, 'PROXY');
+          logger.debug(
+            `PAC returned HTTP proxy for ${url}: ${sanitizeProxyUrl(proxyUrl)}`,
+            'PROXY'
+          );
           return new HttpsProxyAgent(proxyUrl);
         }
       }
@@ -277,9 +302,7 @@ export async function getAgentForUrl(url: string): Promise<ProxyAgent | undefine
     const { url: proxyUrl, type } = proxyConfig.envProxy;
     try {
       logger.debug(`Using env proxy ${sanitizeProxyUrl(proxyUrl)} for ${url}`, 'PROXY');
-      return type === 'socks'
-        ? new SocksProxyAgent(proxyUrl)
-        : new HttpsProxyAgent(proxyUrl);
+      return type === 'socks' ? new SocksProxyAgent(proxyUrl) : new HttpsProxyAgent(proxyUrl);
     } catch (error) {
       logger.error(`Invalid proxy URL "${proxyUrl}": ${error}`, 'PROXY');
       return undefined;

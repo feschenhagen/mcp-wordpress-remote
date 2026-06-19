@@ -6,7 +6,11 @@ import nock from 'nock';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { mkdtemp, writeFile, readFile, rm } from 'fs/promises';
-import { createMockToken, createMockWordPressResponse, createMockErrorResponse } from './mock-factories.js';
+import {
+  createMockToken,
+  createMockWordPressResponse,
+  createMockErrorResponse,
+} from './mock-factories.js';
 
 /**
  * Sets up HTTP mocks for WordPress API
@@ -114,9 +118,7 @@ export class WordPressMockServer {
    * Mock API error responses
    */
   mockError(path: string, status: number, error: any) {
-    return this.scope
-      .get(path)
-      .reply(status, error);
+    return this.scope.get(path).reply(status, error);
   }
 
   /**
@@ -170,10 +172,10 @@ export async function cleanupTempDir(dir: string): Promise<void> {
  */
 export function mockEnv(vars: Record<string, string>): () => void {
   const originalEnv = { ...process.env };
-  
+
   // Set test environment variables
   Object.assign(process.env, vars);
-  
+
   // Return cleanup function
   return () => {
     process.env = originalEnv;
@@ -191,7 +193,9 @@ export function sleep(ms: number): Promise<void> {
  * Generate a random test string
  */
 export function randomString(length: number = 10): string {
-  return Math.random().toString(36).substring(2, 2 + length);
+  return Math.random()
+    .toString(36)
+    .substring(2, 2 + length);
 }
 
 /**

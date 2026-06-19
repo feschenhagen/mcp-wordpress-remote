@@ -26,7 +26,7 @@ test.describe('OAuth Authentication Flow', () => {
     expect(url.searchParams.get('redirect_uri')).toContain('127.0.0.1:3000/callback');
     expect(url.searchParams.get('scope')).toBeTruthy();
     expect(url.searchParams.get('state')).toBeTruthy();
-    
+
     // PKCE parameters for OAuth 2.1 compliance
     expect(url.searchParams.get('code_challenge')).toBeTruthy();
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
@@ -36,23 +36,25 @@ test.describe('OAuth Authentication Flow', () => {
     // 2. Fill in test credentials
     // 3. Submit the form
     // 4. Handle the redirect back to our callback
-    
+
     // For now, we'll simulate the callback
     const state = url.searchParams.get('state');
     const callbackUrl = `http://127.0.0.1:3000/callback?code=test_auth_code&state=${state}`;
-    
+
     await page.goto(callbackUrl);
 
     // Should show success page
     await expect(page.locator('text=Authorization successful')).toBeVisible();
-    
+
     // Should have stored the auth tokens
     // This would be verified by checking the auth storage
   });
 
   test('should handle OAuth authorization errors', async ({ page }) => {
     // Simulate an OAuth error response
-    await page.goto('/callback?error=access_denied&error_description=User%20denied%20authorization&state=test_state');
+    await page.goto(
+      '/callback?error=access_denied&error_description=User%20denied%20authorization&state=test_state'
+    );
 
     // Should show error page
     await expect(page.locator('text=Authorization failed')).toBeVisible();
@@ -71,20 +73,20 @@ test.describe('OAuth Authentication Flow', () => {
     // This test would verify that PKCE verification works correctly
     // It requires coordinating the code verifier from the authorization request
     // with the callback verification
-    
+
     await page.goto('/auth/start');
-    
+
     // Extract state and code challenge from authorization URL
     const authUrl = new URL(page.url());
     const state = authUrl.searchParams.get('state');
     const codeChallenge = authUrl.searchParams.get('code_challenge');
-    
+
     expect(state).toBeTruthy();
     expect(codeChallenge).toBeTruthy();
-    
+
     // Simulate successful callback with proper state
     await page.goto(`/callback?code=valid_auth_code&state=${state}`);
-    
+
     // Should complete successfully if PKCE verification passes
     await expect(page.locator('text=Authorization successful')).toBeVisible();
   });
@@ -105,7 +107,7 @@ test.describe('OAuth Authentication Flow', () => {
     const url = new URL(page.url());
     expect(url.searchParams.get('response_type')).toBe('code');
     expect(url.searchParams.get('client_id')).toBeTruthy();
-    
+
     // Self-hosted sites should use OAuth 2.1 with PKCE
     expect(url.searchParams.get('code_challenge')).toBeTruthy();
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
@@ -118,7 +120,7 @@ test.describe('OAuth Authentication Flow', () => {
         access_token: 'expired_token',
         token_type: 'Bearer',
         expires_in: 3600,
-        obtained_at: Date.now() - (2 * 60 * 60 * 1000), // 2 hours ago
+        obtained_at: Date.now() - 2 * 60 * 60 * 1000, // 2 hours ago
         refresh_token: 'valid_refresh_token',
       };
       (globalThis as any).localStorage.setItem('wp_oauth_tokens', JSON.stringify(expiredToken));
@@ -136,23 +138,20 @@ test.describe('OAuth Authentication Flow', () => {
     // Open multiple pages to simulate concurrent OAuth attempts
     const context1 = await browser.newContext();
     const context2 = await browser.newContext();
-    
+
     const page1 = await context1.newPage();
     const page2 = await context2.newPage();
 
     // Start OAuth flow in both contexts simultaneously
-    await Promise.all([
-      page1.goto('/auth/start'),
-      page2.goto('/auth/start'),
-    ]);
+    await Promise.all([page1.goto('/auth/start'), page2.goto('/auth/start')]);
 
     // Both should get different state parameters
     const url1 = new URL(page1.url());
     const url2 = new URL(page2.url());
-    
+
     const state1 = url1.searchParams.get('state');
     const state2 = url2.searchParams.get('state');
-    
+
     expect(state1).toBeTruthy();
     expect(state2).toBeTruthy();
     expect(state1).not.toBe(state2);
@@ -179,13 +178,13 @@ test.describe('OAuth Authentication Flow', () => {
     // Try to complete the flow after timeout
     const url = new URL(page.url());
     const state = url.searchParams.get('state');
-    
+
     await page.goto(`/callback?code=late_code&state=${state}`);
 
     // Should handle gracefully (either success or appropriate timeout message)
     const hasSuccess = await page.locator('text=Authorization successful').isVisible();
     const hasTimeout = await page.locator('text=Authorization timeout').isVisible();
-    
+
     expect(hasSuccess || hasTimeout).toBe(true);
   });
 
@@ -206,21 +205,24 @@ test.describe('OAuth Authentication Flow', () => {
       alertDialogs.push(dialog);
       dialog.accept();
     });
-    
+
     await page.waitForTimeout(1000);
     expect(alertDialogs).toHaveLength(0); // No script should have executed
   });
 
   test('should work across different browsers', async ({ browserName, page }) => {
     // This test will run for each browser configured in playwright.config.ts
-    test.skip(browserName === 'webkit' && process.platform === 'linux', 'WebKit on Linux not supported');
+    test.skip(
+      browserName === 'webkit' && process.platform === 'linux',
+      'WebKit on Linux not supported'
+    );
 
     // Basic OAuth flow should work in all browsers
     await page.goto('/auth/start');
-    
+
     // Should redirect to authorization endpoint
     await expect(page).toHaveURL(/oauth2\/authorize/);
-    
+
     // OAuth parameters should be present
     const url = new URL(page.url());
     expect(url.searchParams.get('client_id')).toBeTruthy();
